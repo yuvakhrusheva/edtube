@@ -1,0 +1,33 @@
+{
+  "manifest_version": 3,
+  "name": "YouTube Quize-Mode",
+  "version": "0.1.0",
+  "description": "Превращает просмотр обучающих видео на YouTube в интерактивный курс в стиле Coursera.",
+  "permissions": ["activeTab", "storage", "identity", "identity.email"],
+  "host_permissions": [
+    "https://*.youtube.com/*",
+    "https://api.openai.com/*",
+    "https://generativelanguage.googleapis.com/*",
+    "https://oai.hconeai.com/*"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "content_scripts": [
+    {
+      "matches": ["https://*.youtube.com/*"],
+      "js": ["transcript.js", "content.js"],
+      "run_at": "document_idle"
+    }
+  ],
+  "web_accessible_resources": [
+    {
+      "resources": ["page-bridge.js"],
+      "matches": ["https://*.youtube.com/*"]
+    }
+  ],
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "YouTube Quize-Mode"
+  }
+}
