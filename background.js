@@ -1,3 +1,5 @@
+importScripts('api-client.js');
+
 const ANONYMOUS_USER_ID_KEY = 'anonymousUserId';
 
 function getOrCreateAnonymousUserId() {
@@ -62,10 +64,28 @@ async function resolveUserId() {
 }
 
 chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
-  if (message.type !== 'GET_GOOGLE_USER_ID') {
-    return false;
+  if (message.type === 'GET_GOOGLE_USER_ID') {
+    resolveUserId().then(sendResponse);
+    return true;
   }
 
-  resolveUserId().then(sendResponse);
-  return true;
+  if (message.type === 'GENERATE_QUESTION') {
+    const { videoId, chunkIndex, transcriptChunk, language } = message;
+
+    generateQuestion(
+      { videoId, chunkIndex, transcriptChunk, language },
+      resolveUserId,
+    )
+      .then(sendResponse)
+      .catch((error) => {
+        sendResponse({
+          error: error.message || 'Failed to generate question',
+          code: 500,
+        });
+      });
+
+    return true;
+  }
+
+  return false;
 });

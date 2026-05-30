@@ -1,8 +1,14 @@
 const STUDY_MODE_KEY = 'studyModeEnabled';
+const SPA_NAVIGATE_DELAY_MS = 400;
 
 let studyModeEnabled = false;
 let lastVideoId = null;
 let loadingVideoId = null;
+let navigateTimer = null;
+let transcriptChunks = [];
+let questionBlocks = [];
+let currentLanguage = 'ru';
+const generatedChunks = new Set();
 
 function isYouTubeWatchPage() {
   return location.pathname === '/watch' && new URLSearchParams(location.search).has('v');
@@ -10,6 +16,13 @@ function isYouTubeWatchPage() {
 
 function getVideoId() {
   return new URLSearchParams(location.search).get('v');
+}
+
+function resetQuizState() {
+  transcriptChunks = [];
+  questionBlocks = [];
+  generatedChunks.clear();
+  quizScheduler.reset();
 }
 
 function logGoogleUserId() {
@@ -69,6 +82,111 @@ function logTranscriptResult(result) {
   }
 }
 
+function normalizeQuestionBlock(response, videoId) {
+  if (response.status !== 'success' || !Array.isArray(response.questions)) {
+    return response;
+  }
+
+  return {
+    status: 'success',
+    videoId,
+    chunkIndex: response.chunkIndex,
+    pauseTimestampMs: response.pauseTimestampMs,
+    questions: response.questions,
+    quota: response.quota,
+  };
+}
+
+async function generateQuestionForChunk(videoId, chunkIndex, language, { force = false } = {}) {
+  if (!force && generatedChunks.has(chunkIndex)) {
+    return null;
+  }
+
+  const chunk = transcriptChunks[chunkIndex];
+  if (!chunk?.length) {
+    return null;
+  }
+
+  generatedChunks.add(chunkIndex);
+
+  const response = await new Promise((resolve) => {
+    chrome.runtime.sendMessage(
+      {
+        type: 'GENERATE_QUESTION',
+        videoId,
+        chunkIndex,
+        transcriptChunk: chunk,
+        language,
+      },
+      resolve,
+    );
+  });
+
+  if (chrome.runtime.lastError) {
+    console.error('[Quize-Mode] Failed to generate question:', chrome.runtime.lastError.message);
+    generatedChunks.delete(chunkIndex);
+    return { error: chrome.runtime.lastError.message };
+  }
+
+  if (response?.error) {
+    console.error('[Quize-Mode] Question generation error:', response.error, response.code || '');
+    if (response.quota) {
+      console.warn('[Quize-Mode] Quota:', response.quota);
+    }
+    generatedChunks.delete(chunkIndex);
+    return response;
+  }
+
+  if (response.status === 'success') {
+    const block = normalizeQuestionBlock(response, videoId);
+    questionBlocks.push(block);
+    console.log('[Quize-Mode] Question block:', {
+      chunkIndex: block.chunkIndex,
+      pauseTimestampMs: block.pauseTimestampMs,
+      questionCount: block.questions.length,
+    });
+    return block;
+  }
+
+  if (response.status === 'skip') {
+    console.log('[Quize-Mode] Chunk skipped (no educational content):', {
+      videoId,
+      chunkIndex,
+    });
+    generatedChunks.delete(chunkIndex);
+  }
+
+  return response;
+}
+
+async function regenerateQuestionForChunk(videoId, chunkIndex, language) {
+  generatedChunks.delete(chunkIndex);
+  return generateQuestionForChunk(videoId, chunkIndex, language, { force: true });
+}
+
+async function startQuizGeneration(result) {
+  resetQuizState();
+  currentLanguage = result.track.languageCode;
+  transcriptChunks = chunkSegments(result.segments);
+
+  console.log('[Quize-Mode] Transcript chunked:', {
+    videoId: result.videoId,
+    chunkCount: transcriptChunks.length,
+    chunkSizes: transcriptChunks.map((chunk) => chunk.length),
+  });
+
+  if (transcriptChunks.length === 0) {
+    return;
+  }
+
+  const firstBlock = await generateQuestionForChunk(result.videoId, 0, currentLanguage);
+  if (firstBlock?.status === 'success') {
+    quizScheduler.registerBlock(firstBlock);
+  }
+
+  quizScheduler.startWatching(result.videoId);
+}
+
 async function loadTranscriptIfNeeded() {
   if (!studyModeEnabled || !isYouTubeWatchPage()) {
     return;
@@ -95,6 +213,10 @@ async function loadTranscriptIfNeeded() {
     }
 
     logTranscriptResult(result);
+
+    if (result.status === 'success') {
+      await startQuizGeneration(result);
+    }
   } finally {
     if (loadingVideoId === videoId) {
       loadingVideoId = null;
@@ -102,15 +224,50 @@ async function loadTranscriptIfNeeded() {
   }
 }
 
+function scheduleTranscriptLoad() {
+  if (navigateTimer) {
+    clearTimeout(navigateTimer);
+  }
+
+  navigateTimer = setTimeout(() => {
+    navigateTimer = null;
+    loadTranscriptIfNeeded();
+  }, SPA_NAVIGATE_DELAY_MS);
+}
+
 function initStudyModeState() {
   chrome.storage.local.get(STUDY_MODE_KEY, (result) => {
     studyModeEnabled = Boolean(result[STUDY_MODE_KEY]);
     if (studyModeEnabled) {
       lastVideoId = null;
+      resetQuizState();
       loadTranscriptIfNeeded();
     }
   });
 }
+
+quizScheduler.init(
+  async (chunkIndex) => {
+    const videoId = getVideoId();
+    if (!videoId || !studyModeEnabled) {
+      return null;
+    }
+
+    const block = await generateQuestionForChunk(videoId, chunkIndex, currentLanguage);
+    if (block?.status === 'success') {
+      quizScheduler.registerBlock(block);
+    }
+    return block;
+  },
+  async (chunkIndex) => {
+    const videoId = getVideoId();
+    if (!videoId || !studyModeEnabled) {
+      return null;
+    }
+
+    return regenerateQuestionForChunk(videoId, chunkIndex, currentLanguage);
+  },
+);
 
 chrome.storage.onChanged.addListener((changes, area) => {
   if (area !== 'local' || !changes[STUDY_MODE_KEY]) {
@@ -120,20 +277,28 @@ chrome.storage.onChanged.addListener((changes, area) => {
   studyModeEnabled = Boolean(changes[STUDY_MODE_KEY].newValue);
   if (studyModeEnabled) {
     lastVideoId = null;
+    resetQuizState();
     loadTranscriptIfNeeded();
   } else {
     lastVideoId = null;
+    quizScheduler.stopWatching();
+    resetQuizState();
   }
 });
 
 document.addEventListener('yt-navigate-finish', () => {
   if (!isYouTubeWatchPage()) {
     lastVideoId = null;
+    quizScheduler.stopWatching();
+    resetQuizState();
     return;
   }
 
   if (studyModeEnabled) {
-    loadTranscriptIfNeeded();
+    lastVideoId = null;
+    quizScheduler.stopWatching();
+    resetQuizState();
+    scheduleTranscriptLoad();
   }
 });
 

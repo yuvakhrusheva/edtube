@@ -2,6 +2,8 @@ const PAGE_BRIDGE_SOURCE = 'quize-mode-extension';
 const PLAYER_DATA_RETRIES = 3;
 const PLAYER_DATA_RETRY_DELAY_MS = 500;
 const TRANSCRIPT_FETCH_RETRIES = 2;
+const STALE_PLAYER_DATA_RETRIES = 3;
+const STALE_PLAYER_DATA_DELAY_MS = 400;
 
 function formatTimestamp(ms) {
   const totalSeconds = Math.floor(ms / 1000);
@@ -368,16 +370,22 @@ async function loadTranscriptForVideo(videoId) {
 
 async function fetchTranscript(videoId) {
   let lastResult = null;
+  const maxAttempts = TRANSCRIPT_FETCH_RETRIES + STALE_PLAYER_DATA_RETRIES;
 
-  for (let attempt = 1; attempt <= TRANSCRIPT_FETCH_RETRIES; attempt += 1) {
+  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
     lastResult = await loadTranscriptForVideo(videoId);
 
     if (lastResult.status === 'success' || lastResult.status === 'no_captions') {
       return lastResult;
     }
 
-    if (lastResult.status === 'fetch_failed' && attempt < TRANSCRIPT_FETCH_RETRIES) {
-      await delay(PLAYER_DATA_RETRY_DELAY_MS);
+    const isStale = lastResult.reason === 'stale_player_data';
+    const canRetry =
+      attempt < maxAttempts &&
+      (isStale || lastResult.status === 'fetch_failed' || lastResult.status === 'player_data_unavailable');
+
+    if (canRetry) {
+      await delay(isStale ? STALE_PLAYER_DATA_DELAY_MS : PLAYER_DATA_RETRY_DELAY_MS);
       continue;
     }
 

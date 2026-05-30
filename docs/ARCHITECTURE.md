@@ -18,11 +18,11 @@ sequenceDiagram
     CS->>Bridge: REQUEST_TRANSCRIPT
     Bridge->>Bridge: timedtext / get_transcript / ANDROID srv3
     Bridge-->>CS: segments with timestamps
-    CS->>BG: GENERATE_QUESTION planned
+    CS->>BG: GENERATE_QUESTION
     BG->>API: POST /quiz/generate + userId
     API->>LLM: keys on server only
     API-->>BG: question + quota
-    BG-->>CS: overlay planned
+    BG-->>CS: questions array in console
   end
 ```
 
@@ -39,7 +39,14 @@ sequenceDiagram
 - При включённом study mode вызывает `fetchTranscript(videoId)`.
 - Слушает `chrome.storage.onChanged` и `yt-navigate-finish` (SPA).
 - Логирует user ID через `GET_GOOGLE_USER_ID` (background).
-- Планируется: пауза плеера, оверлей quiz, отправка чанков в background.
+- После загрузки транскрипта: chunking (**5 мин**), генерация блока из **3 вопросов**, `quiz-scheduler` следит за `pauseTimestampMs`.
+- Одна пауза → серия из 3 MCQ в overlay; **≤1 ошибка** → продолжить; **≥2 ошибки** → пересмотр чанка + regenerate.
+
+### quiz-player.js / quiz-overlay.js / quiz-scheduler.js
+
+- `quiz-player.js`: доступ к `<video>`, pause/play/seek, polling currentTime.
+- `quiz-overlay.js` + CSS: glassmorphism overlay, 4 варианта, «Продолжить» / «Вернуться назад».
+- `quiz-scheduler.js`: регистрация вопросов, триггер паузы, preload chunk N+1.
 
 ### transcript.js
 
@@ -59,12 +66,13 @@ Inject через `web_accessible_resources`. Не имеет доступа к 
 3. Timedtext (пропуск raw/json/xml при `exp=xpe`).
 4. ANDROID `/player` + timedtext `fmt=srv3`.
 
-### background.js
+### background.js + api-client.js
 
 - `chrome.identity.getProfileUserInfo` → Google user ID.
 - Fallback: `anonymousUserId` (UUID в storage).
-- Message: `GET_GOOGLE_USER_ID`.
-- Планируется: `api-client.js`, session bootstrap, `GENERATE_QUESTION`, quota.
+- Messages: `GET_GOOGLE_USER_ID`, `GENERATE_QUESTION`.
+- `api-client.js`: session bootstrap (`POST /v1/auth/bootstrap`), quiz generate (`POST /v1/quiz/generate`).
+- Кеш: `sessionToken`, `sessionExpiresAt`, `quotaCache`.
 
 ## chrome.storage.local
 
@@ -72,8 +80,9 @@ Inject через `web_accessible_resources`. Не имеет доступа к 
 |------|-----|----------|
 | `studyModeEnabled` | boolean | Режим учёбы (default `false`) |
 | `anonymousUserId` | string | UUID если нет Google profile ID |
-| `sessionToken` | string | 🔜 после интеграции backend |
-| `quotaCache` | object | 🔜 `{ used, limit, resetsAt }` для UI |
+| `sessionToken` | string | JWT после bootstrap |
+| `sessionExpiresAt` | string | ISO-8601 expiry |
+| `quotaCache` | object | `{ used, limit, resetsAt }` с последнего generate |
 
 **Не хранить:** DeepSeek/OpenAI/Gemini/Helicone API keys.
 
@@ -94,12 +103,12 @@ Inject через `web_accessible_resources`. Не имеет доступа к 
 | `REQUEST_PLAYER_DATA` | content → page (postMessage) | ✅ internal |
 | `REQUEST_TRANSCRIPT` | content → page (postMessage) | ✅ internal |
 | `GET_LLM_STATUS` | popup → background | 🔜 |
-| `GENERATE_QUESTION` | content → background | 🔜 |
+| `GENERATE_QUESTION` | content → background | ✅ |
 | `GET_QUOTA` | popup → background | 🔜 |
 
-## Backend API (план)
+## Backend API
 
-Ключи — только в `.env` на сервере ([`.env.example`](../.env.example)).
+Реализация: [`server/`](../server/). Ключи — только в `.env` на сервере ([`.env.example`](../.env.example)).
 
 ### POST /v1/auth/bootstrap
 
@@ -113,18 +122,24 @@ Inject через `web_accessible_resources`. Не имеет доступа к 
 ```json
 {
   "videoId": "zwSikeU-STI",
+  "chunkIndex": 0,
   "transcriptChunk": [{ "startMs": 0, "text": "..." }],
   "language": "ru"
 }
 → {
   "status": "success" | "skip",
-  "pauseTimestampMs": 342000,
-  "question": "...",
-  "options": ["...", "...", "...", "..."],
-  "correctIndex": 1,
-  "quota": { "used": 3, "limit": 5 }
+  "chunkIndex": 0,
+  "pauseTimestampMs": 252000,
+  "questions": [
+    { "question": "...", "options": ["...", "...", "...", "..."], "correctIndex": 1 },
+    { "question": "...", "options": ["...", "...", "...", "..."], "correctIndex": 0 },
+    { "question": "...", "options": ["...", "...", "...", "..."], "correctIndex": 2 }
+  ],
+  "quota": { "used": 3, "limit": 5, "resetsAt": "..." }
 }
 ```
+
+Чанк = **5 минут** видео. Один generate = **3 MCQ** + 1 слот квоты. При ≥2 ошибках из 3 — пересмотр чанка и **новая генерация**.
 
 Лимиты и Premium проверяются **на сервере**; extension только отображает `quota`.
 

@@ -6,6 +6,7 @@
   "permissions": ["activeTab", "storage", "identity", "identity.email"],
   "host_permissions": [
     "https://*.youtube.com/*",
+    "http://localhost:3001/*",
     "https://api.openai.com/*",
     "https://generativelanguage.googleapis.com/*",
     "https://oai.hconeai.com/*"
@@ -16,7 +17,15 @@
   "content_scripts": [
     {
       "matches": ["https://*.youtube.com/*"],
-      "js": ["transcript.js", "content.js"],
+      "js": [
+        "transcript.js",
+        "transcript-chunk.js",
+        "quiz-player.js",
+        "quiz-overlay.js",
+        "quiz-scheduler.js",
+        "content.js"
+      ],
+      "css": ["quiz-overlay.css"],
       "run_at": "document_idle"
     }
   ],
